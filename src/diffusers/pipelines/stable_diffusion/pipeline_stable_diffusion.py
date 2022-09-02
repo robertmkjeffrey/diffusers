@@ -11,6 +11,8 @@ from ...pipeline_utils import DiffusionPipeline
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 from .safety_checker import StableDiffusionSafetyChecker
 
+print("Version: 1.1")
+
 
 class StableDiffusionPipeline(DiffusionPipeline):
     def __init__(
@@ -36,9 +38,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
         )
 
     @torch.no_grad()
-    def __call__(
+    def _run(
         self,
-        prompt: Union[str, List[str]],
+        prompt_embeddings,
+        batch_size = 1,
         height: Optional[int] = 512,
         width: Optional[int] = 512,
         num_inference_steps: Optional[int] = 50,
@@ -61,26 +64,6 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             self.to(device)
 
-        if isinstance(prompt, str):
-            batch_size = 1
-        elif isinstance(prompt, list):
-            batch_size = len(prompt)
-        else:
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
-
-        if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
-
-        # get prompt text embeddings
-        text_input = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]
-
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
@@ -96,7 +79,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
-            text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+            prompt_embeddings = torch.cat([uncond_embeddings, prompt_embeddings])
 
         # get the initial random noise unless the user supplied it
         latents_shape = (batch_size, self.unet.in_channels, height // 8, width // 8)
@@ -141,7 +124,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
 
             # predict the noise residual
-            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings)["sample"]
+            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=prompt_embeddings)["sample"]
 
             # perform guidance
             if do_classifier_free_guidance:
@@ -169,3 +152,64 @@ class StableDiffusionPipeline(DiffusionPipeline):
             image = self.numpy_to_pil(image)
 
         return {"sample": image, "nsfw_content_detected": has_nsfw_concept}
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        prompt: Union[str, List[str]],
+        height: Optional[int] = 512,
+        width: Optional[int] = 512,
+        num_inference_steps: Optional[int] = 50,
+        guidance_scale: Optional[float] = 7.5,
+        eta: Optional[float] = 0.0,
+        generator: Optional[torch.Generator] = None,
+        latents: Optional[torch.FloatTensor] = None,
+        output_type: Optional[str] = "pil",
+        **kwargs,
+    ):
+
+        if "torch_device" in kwargs:
+            device = kwargs.pop("torch_device")
+            warnings.warn(
+                "`torch_device` is deprecated as an input argument to `__call__` and will be removed in v0.3.0."
+                " Consider using `pipe.to(torch_device)` instead."
+            )
+
+            # Set device as before (to be removed in 0.3.0)
+            if device is None:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.to(device)
+
+        if isinstance(prompt, str):
+            batch_size = 1
+        elif isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+
+        if height % 8 != 0 or width % 8 != 0:
+            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
+
+        # get prompt text embeddings
+        text_input = self.tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]
+
+        return self._run(
+            prompt_embeddings = text_embeddings,
+            batch_size = batch_size,
+            height = height,
+            width = width,
+            num_inference_steps = num_inference_steps,
+            guidance_scale = guidance_scale,
+            eta = eta,
+            generator = generator,
+            latents = latents,
+            output_type = output_type,
+            **kwargs,
+            )
